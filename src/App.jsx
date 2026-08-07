@@ -24,6 +24,7 @@ function useImage(src) {
     const image = new Image();
     image.crossOrigin = 'anonymous';
     image.onload = () => setImg(image);
+    image.onerror = () => setImg(null);
     image.src = src;
   }, [src]);
   return img;
@@ -57,14 +58,16 @@ export default function App() {
   const necklace = getProduct(selectedNecklace);
   const earringImg = useImage(earring?.image);
   const necklaceImg = useImage(necklace?.image);
-  const total = cart.reduce((sum, item) => sum + item.price, 0);
+  const cartItems = useMemo(() => cart.map(id => getProduct(id)).filter(Boolean), [cart]);
+  const wishItems = useMemo(() => wishlist.map(id => getProduct(id)).filter(Boolean), [wishlist]);
+  const total = useMemo(() => cartItems.reduce((sum, item) => sum + item.price, 0), [cartItems]);
 
   useEffect(() => {
     if (!location.hash.startsWith('#look=')) return;
     try {
       const data = JSON.parse(atob(decodeURIComponent(location.hash.replace('#look=', ''))));
-      if (data.e) setSelectedEarring(data.e);
-      if (data.n) setSelectedNecklace(data.n);
+      if (data.e && getProduct(data.e)) setSelectedEarring(data.e);
+      if (data.n && getProduct(data.n)) setSelectedNecklace(data.n);
       if (data.f) setFit({ ...DEFAULT_FIT, ...data.f });
       setStatus('Shared look loaded. Start camera to view it.');
     } catch {
@@ -72,7 +75,9 @@ export default function App() {
     }
   }, [setFit, setSelectedEarring, setSelectedNecklace]);
 
-  const addUnique = (setter, item) => setter(prev => prev.some(p => p.id === item.id) ? prev : [...prev, item]);
+  const addUniqueId = (setter, productId) => {
+    setter(prev => prev.includes(productId) ? prev : [...prev, productId]);
+  };
 
   const drawDebugPoint = (ctx, x, y, label) => {
     ctx.save();
@@ -95,6 +100,11 @@ export default function App() {
     return p;
   };
 
+  const isVisibleLandmark = landmark => {
+    if (!landmark) return false;
+    return landmark.x > 0.03 && landmark.x < 0.97 && landmark.y > 0.03 && landmark.y < 0.97;
+  };
+
   const drawJewelry = useCallback(() => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
@@ -104,6 +114,7 @@ export default function App() {
     canvas.height = video.videoHeight;
     const w = canvas.width;
     const h = canvas.height;
+
     ctx.clearRect(0, 0, w, h);
     ctx.save();
     ctx.scale(-1, 1);
@@ -119,16 +130,17 @@ export default function App() {
       const chin = face[152];
       const forehead = face[10];
       const faceHeight = Math.abs((chin.y - forehead.y) * h) || h * 0.34;
-      const ew = clamp(faceHeight * 0.24 * fit.overallSize, 36, 150);
+      const ew = clamp(faceHeight * 0.22 * fit.overallSize, 32, 135);
       const eh = ew * (earringImg.height / earringImg.width);
-      const points = [
+      const ears = [
         { p: leftEar, key: 'earL', side: -1, label: 'L ear' },
         { p: rightEar, key: 'earR', side: 1, label: 'R ear' }
       ];
-      for (const item of points) {
+      for (const item of ears) {
+        if (!isVisibleLandmark(item.p)) continue;
         const rawX = (1 - item.p.x) * w + item.side * fit.earringSpread;
         const rawY = item.p.y * h + fit.earringDrop;
-        const pt = smoothPoint(item.key, rawX, rawY);
+        const pt = smoothPoint(item.key, rawX, rawY, 0.22);
         ctx.drawImage(earringImg, pt.x - ew / 2, pt.y - eh * 0.08, ew, eh);
         if (trackingPoints) drawDebugPoint(ctx, pt.x, pt.y, item.label);
       }
@@ -140,11 +152,12 @@ export default function App() {
       let baseWidth = w * 0.52;
       let angle = 0;
       let source = 'manual';
+
       if (autoDrape && pose?.[11] && pose?.[12] && (pose[11].visibility ?? 1) > 0.45 && (pose[12].visibility ?? 1) > 0.45) {
         const l = { x: (1 - pose[11].x) * w, y: pose[11].y * h };
         const r = { x: (1 - pose[12].x) * w, y: pose[12].y * h };
-        const sL = smoothPoint('shoulderL', l.x, l.y, 0.2);
-        const sR = smoothPoint('shoulderR', r.x, r.y, 0.2);
+        const sL = smoothPoint('shoulderL', l.x, l.y, 0.18);
+        const sR = smoothPoint('shoulderR', r.x, r.y, 0.18);
         cx = (sL.x + sR.x) / 2;
         cy = (sL.y + sR.y) / 2 + fit.necklaceHeight;
         baseWidth = Math.abs(sR.x - sL.x) * 1.08;
@@ -161,9 +174,10 @@ export default function App() {
         baseWidth = Math.abs(r.x - l.x) * w * 2.05;
         source = 'face fallback';
       }
-      const nw = clamp(baseWidth * fit.necklaceSize * fit.overallSize, 180, w * 0.92);
+
+      const nw = clamp(baseWidth * fit.necklaceSize * fit.overallSize, 150, w * 0.92);
       const nh = nw * (necklaceImg.height / necklaceImg.width);
-      const pt = smoothPoint('necklace', cx, cy, 0.18);
+      const pt = smoothPoint('necklace', cx, cy, 0.16);
       ctx.save();
       ctx.translate(pt.x, pt.y);
       ctx.rotate(angle * 0.45);
@@ -185,7 +199,7 @@ export default function App() {
 
   const startCamera = async () => {
     if (!window.FaceMesh || !window.Pose || !window.Camera) {
-      setStatus('MediaPipe libraries are still loading. Check internet connectivity and refresh if needed.');
+      setStatus('MediaPipe libraries are still loading. Refresh if this message stays visible.');
       return;
     }
     try {
@@ -207,7 +221,7 @@ export default function App() {
       });
       await cameraRef.current.start();
       setIsLive(true);
-      setStatus('Live try-on running. All processing is on-device.');
+      setStatus('Live try-on running. Tracking face and shoulders on-device.');
     } catch (error) {
       setStatus(`Camera failed: ${error.message}`);
     }
@@ -216,6 +230,12 @@ export default function App() {
   const stopCamera = () => {
     const stream = videoRef.current?.srcObject;
     if (stream) stream.getTracks().forEach(track => track.stop());
+    if (videoRef.current) videoRef.current.srcObject = null;
+    const canvas = canvasRef.current;
+    if (canvas) canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
+    faceResultsRef.current = null;
+    poseResultsRef.current = null;
+    smoothRef.current = {};
     cameraRef.current = null;
     setIsLive(false);
     setStatus('Camera stopped.');
@@ -223,11 +243,15 @@ export default function App() {
 
   const snapshot = () => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
+    if (!canvas || canvas.width === 0 || canvas.height === 0) {
+      setStatus('Start camera before taking a snapshot.');
+      return;
+    }
     const link = document.createElement('a');
     link.download = `gemlook-${Date.now()}.png`;
     link.href = canvas.toDataURL('image/png');
     link.click();
+    setStatus('Snapshot downloaded.');
   };
 
   const createShare = () => {
@@ -239,8 +263,12 @@ export default function App() {
   };
 
   const copyShare = async () => {
-    await navigator.clipboard.writeText(shareUrl);
-    setStatus('Share link copied.');
+    try {
+      await navigator.clipboard.writeText(shareUrl);
+      setStatus('Share link copied.');
+    } catch {
+      setStatus('Copy blocked by browser. Select and copy the link manually.');
+    }
   };
 
   const tryProduct = product => {
@@ -248,9 +276,6 @@ export default function App() {
     if (product.category === 'necklace') setSelectedNecklace(product.id);
     setStatus(`${product.name} selected for try-on.`);
   };
-
-  const cartItems = useMemo(() => cart.map(id => getProduct(id)).filter(Boolean), [cart]);
-  const wishItems = useMemo(() => wishlist.map(id => getProduct(id)).filter(Boolean), [wishlist]);
 
   return (
     <main className="app-shell">
@@ -282,7 +307,7 @@ export default function App() {
         <ControlPanel fit={fit} setFit={setFit} trackingPoints={trackingPoints} setTrackingPoints={setTrackingPoints} autoDrape={autoDrape} setAutoDrape={setAutoDrape} onSnapshot={snapshot} onReset={() => setFit(DEFAULT_FIT)} onStop={stopCamera} />
       </section>
 
-      <ProductCatalog selectedEarring={selectedEarring} selectedNecklace={selectedNecklace} onTry={tryProduct} onWish={p => addUnique(setWishlist, p.id)} onCart={p => addUnique(setCart, p.id)} />
+      <ProductCatalog selectedEarring={selectedEarring} selectedNecklace={selectedNecklace} onTry={tryProduct} onWish={p => addUniqueId(setWishlist, p.id)} onCart={p => addUniqueId(setCart, p.id)} />
 
       <Drawer title="Your Cart" open={cartOpen} onClose={() => setCartOpen(false)} items={cartItems} total={total} emptyText="Your cart is empty.">
         <button className="wide">Checkout</button>
